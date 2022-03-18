@@ -1,3 +1,5 @@
+from cmath import nan
+from json import load
 import os
 import random
 import time
@@ -15,6 +17,10 @@ from skimage.io import imread, imsave
 from skimage.transform import resize, rescale, rotate
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose
+import poptorch
+from tqdm import tqdm
+import time
+
 torch.manual_seed(3)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -249,7 +255,7 @@ class Scale(object):
             image,
             (scale, scale),
             #multichannel=True,
-            channel_axis=-1,
+            multichannel=True,
             preserve_range=True,
             mode="constant",
             anti_aliasing=False,
@@ -258,8 +264,7 @@ class Scale(object):
             mask,
             (scale, scale),
             order=0,
-            #multichannel=True,
-            channel_axis=-1,
+            multichannel=True,
             preserve_range=True,
             mode="constant",
             anti_aliasing=False,
@@ -423,6 +428,19 @@ class DiceLoss(nn.Module):
         return 1. - dsc
 
 
+class Unet_with_loss(nn.Module):
+    def __init__(self, model) -> None:
+        super().__init__()
+        self.model = model
+        self.loss = DiceLoss()
+
+    def forward(self, input, output=None):
+        model_output = self.model(input)
+        if output is None:
+            return model_output
+        else:
+            return model_output, poptorch.identity_loss(self.loss(model_output, output), "none")
+
 def log_images(x, y_true, y_pred, channel=1):
     images = []
     x_np = x[:, channel].cpu().numpy()
@@ -457,7 +475,7 @@ def outline(image, mask, color):
 
 
 def data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
-    dataset_train, dataset_valid = datasets("/lus/theta-fs0/projects/datascience/vsastry/brain-segmentation-pytorch/lgg-mri-segmentation/kaggle_3m", image_size, aug_scale, aug_angle)
+    dataset_train, dataset_valid = datasets("/localdata/datasets/kaggle_3m/", image_size, aug_scale, aug_angle)
 
     def worker_init(worker_id):
         np.random.seed(2021)
@@ -474,7 +492,7 @@ def data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
     loader_valid = DataLoader(
         dataset_valid,
         batch_size=batch_size,
-        drop_last=False,
+        drop_last=True,
         num_workers=workers,
         worker_init_fn=worker_init,
     )
@@ -572,8 +590,8 @@ def plot_dsc(dsc_dist):
     return np.fromstring(s, np.uint8).reshape((height, width, 4))
 
 
-batch_size = 1
-epochs = 20
+batch_size = 16
+epochs = 50
 lr = 0.0001
 workers = 0
 weights = "./"
@@ -584,105 +602,115 @@ aug_angle = 15
 
 
 def train_validate():
-    device = torch.device("cpu" if not torch.cuda.is_available() else "cuda:0")
     
     loader_train, loader_valid = data_loaders(batch_size, workers, image_size, aug_scale, aug_angle)
     loaders = {"train": loader_train, "valid": loader_valid}
-    
+
+    model_opts = poptorch.Options()
+    model_opts.enableExecutableCaching("./cache")
+    # model_opts.deviceIterations(device_iter)
+    # model_opts.replicationFactor(replicas)
+
     unet = UNet(in_channels=BrainSegmentationDataset.in_channels, out_channels=BrainSegmentationDataset.out_channels)
-    unet.to(device)
-    
-    dsc_loss = DiceLoss()
+    train_model_with_loss = Unet_with_loss(unet)
+    optimizer = poptorch.optim.Adam(unet.parameters(), lr=lr) 
+    training_model = poptorch.trainingModel(train_model_with_loss, options=model_opts, optimizer=optimizer)
+    inference_model = poptorch.inferenceModel(train_model_with_loss, options=model_opts)
+
+    train_img, train_lbl = next(iter(loader_train))
+    val_img, val_lbl     = next(iter(loader_valid))
+
+    # Compile the Training the first
+    if not training_model.isCompiled():
+        time2compile = time.perf_counter()
+        print("Compiling Training Model")
+        training_model.compile( train_img, train_lbl )
+        time2compile = time.perf_counter()-time2compile
+        print("Training model compile time: {:.3f} s".format(time2compile))
+
+    if not inference_model.isCompiled():
+        time2compile = time.perf_counter()
+        print("Compiling Inference Model")
+        inference_model.compile( val_img, val_lbl )
+        time2compile = time.perf_counter()-time2compile
+        print("Inference model compile time: {:.3f} s".format(time2compile))
+
     best_validation_dsc = 0.0
-    
-    optimizer = optim.Adam(unet.parameters(), lr=lr)
-    
-    loss_train = []
-    loss_valid = []
-    
-    step = 0
-    total_train_time = 0 
-    for epoch in range(epochs):
-        #print(f"epoch : {epoch}")
-        for phase in ["train", "valid"]:
-            if phase == "train":
-                unet.train()
-            else:
-                unet.eval()
-    
-            validation_pred = []
-            validation_true = []
-    
-            for i, data in enumerate(loaders[phase]):
-                if phase == "train":
-                    step += 1
-    
-                x, y_true = data
-                x, y_true = x.to(device), y_true.to(device)
-                
-                optimizer.zero_grad()
-    
-                with torch.set_grad_enabled(phase == "train"):
-                    if phase == 'train':
-                        st_timer = time.time()
 
-                    y_pred = unet(x)
-                    loss = dsc_loss(y_pred, y_true)
-                    
-                    if phase == "valid":
-                        loss_valid.append(loss.item())
-                        y_pred_np = y_pred.detach().cpu().numpy()
-                        validation_pred.extend(
-                            [y_pred_np[s] for s in range(y_pred_np.shape[0])]
-                        )
-                        y_true_np = y_true.detach().cpu().numpy()
-                        validation_true.extend(
-                            [y_true_np[s] for s in range(y_true_np.shape[0])]
-                        )
-                        
-                    if phase == "train":
-                        #loss_train.append(loss.item())
-                        loss.backward()
-                        optimizer.step()
-                        end_timer = time.time()
-                        loss_train.append(loss.item())
-                        total_train_time = total_train_time +  (end_timer - st_timer)
-                        #print(f"loss of step {step} : {loss}")
-    
-            if phase == "train":
-                log_loss_summary(loss_train, epoch)
-                loss_train = []
+    prog_bar = tqdm(range(1,epochs))
 
-            if phase == "valid":
-                log_loss_summary(loss_valid, epoch, prefix="val_")
-                mean_dsc = np.mean(
-                    dsc_per_volume(
-                        validation_pred,
-                        validation_true,
-                        loader_valid.dataset.patient_slice_index,
-                    )
-                )
-                log_scalar_summary("val_dsc", mean_dsc, epoch)
-                if mean_dsc > best_validation_dsc:
-                    best_validation_dsc = mean_dsc
-                    torch.save(unet.state_dict(), os.path.join(weights, "unet.pt"))
-                loss_valid = []
-    print(f"total_train_time = {total_train_time} for {epochs} epochs and {step} steps")
-    print("\nBest validation mean DSC: {:4f}\n".format(best_validation_dsc))
-    
+    tot_time_start = time.perf_counter()
+
+    time_train = 0
+    val_time   = 0
+
+    for epoch in prog_bar:
+
+        validation_pred = []
+        validation_true = []
+
+        train_loss = 0
+        for X,Y in loader_train:
+            tic = time.perf_counter()
+            _, loss = training_model(X,Y)
+            toc = time.perf_counter()
+            time_train += toc-tic
+
+            train_loss += loss.item()
+        train_loss /= len(loader_train)
+        training_model.copyWeightsToHost()
+
+        valid_loss = 0
+        for X,Y in loader_valid:
+            tic = time.perf_counter()
+            y_pred, loss = inference_model(X,Y)
+            toc = time.perf_counter()
+            val_time += toc-tic
+            valid_loss += loss.item()
+
+            y_pred_np = y_pred.detach().cpu().numpy()
+            validation_pred.extend( [y_pred_np[s] for s in range(y_pred_np.shape[0])]  )
+            y_true_np = Y.detach().cpu().numpy()
+            validation_true.extend( [y_true_np[s] for s in range(y_true_np.shape[0])]   )
+
+        mean_dsc = np.mean( dsc_per_volume(
+                                validation_pred,
+                                validation_true,
+                                loader_valid.dataset.patient_slice_index,
+                            )
+                            )
+        if mean_dsc > best_validation_dsc:
+            best_validation_dsc = mean_dsc
+            torch.save(unet.state_dict(), os.path.join(weights, "unet.pt"))
+
+        valid_loss /= len(loader_valid)
+
+        prog_bar.set_description(" Loss: (Train, Val) = ({:0.6f}, {:0.6f}) Best DCE: {:0.6f}".format(train_loss, valid_loss, best_validation_dsc))
+
+#        prog_bar.set_description(" Training Loss:{:0.6f}, Validation Loss:{:0.6f} Img/s: {:d}".format(loss_train, loss_valid, int(throughput)))
+        # torch.save(model.state_dict(), "%s/mdl-it%05d.pth" % (itr_out_dir, epoch))
+  
+    tot_time_end = time.perf_counter()
+
+    print(f"{tot_time_end-tot_time_start} seconds train {epochs} ")
+    print(f"total_train_time = {time_train} for {epochs} epochs and {len(loader_train)*epochs} steps")
+    print(f"total_val_time  =  {val_time} for {epochs} epochs and {len(loader_valid)*epochs} steps")
+
+    training_model.detachFromDevice()
+    inference_model.detachFromDevice()
+
     state_dict = torch.load(os.path.join(weights, "unet.pt"))
     unet.load_state_dict(state_dict)
-    unet.eval()
-    
+    final_model = Unet_with_loss(unet)
+    inference_model = poptorch.inferenceModel(final_model, options=model_opts)
+
     input_list = []
     pred_list = []
     true_list = []
     
-    for i, data in enumerate(loader_valid):
-        x, y_true = data
-        x, y_true = x.to(device), y_true.to(device)
-        with torch.set_grad_enabled(False):
-            y_pred = unet(x)
+    for x, y_true in loader_valid:
+        with torch.no_grad():
+            y_pred = inference_model(x)
             y_pred_np = y_pred.detach().cpu().numpy()
             pred_list.extend([y_pred_np[s] for s in range(y_pred_np.shape[0])])
             y_true_np = y_true.detach().cpu().numpy()
@@ -716,5 +744,9 @@ def train_validate():
             imsave(filepath, image)
 
 
-train_validate()
+    return
+
+
+if __name__ == "__main__":
+    train_validate()
 
