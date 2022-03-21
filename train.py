@@ -1,6 +1,7 @@
 from cmath import nan
+from codecs import ignore_errors
 from json import load
-import os
+import os, shutil
 import random
 import time
 from collections import OrderedDict
@@ -599,6 +600,7 @@ image_size = 32
 #image_size = 224
 aug_scale = 0.05
 aug_angle = 15
+output_dir = "./output"
 
 
 def train_validate():
@@ -704,10 +706,14 @@ def train_validate():
     final_model = Unet_with_loss(unet)
     inference_model = poptorch.inferenceModel(final_model, options=model_opts)
 
+    shutil.rmtree(output_dir,ignore_errors=True)
+    os.mkdir(output_dir)
     input_list = []
     pred_list = []
     true_list = []
-    
+
+
+
     for x, y_true in loader_valid:
         with torch.no_grad():
             y_pred = inference_model(x)
@@ -729,7 +735,7 @@ def train_validate():
     dsc_dist = dsc_distribution(volumes)
 
     dsc_dist_plot = plot_dsc(dsc_dist)
-    imsave("./dsc.png", dsc_dist_plot)
+    imsave( os.path.join(output_dir, "dsc.png"), dsc_dist_plot)
 
     for p in volumes:
         x = volumes[p][0]
@@ -740,7 +746,7 @@ def train_validate():
             image = outline(image, y_pred[s, 0], color=[255, 0, 0])
             image = outline(image, y_true[s, 0], color=[0, 255, 0])
             filename = "{}-{}.png".format(p, str(s).zfill(2))
-            filepath = os.path.join("./", filename)
+            filepath = os.path.join(output_dir, filename)
             imsave(filepath, image)
 
 
