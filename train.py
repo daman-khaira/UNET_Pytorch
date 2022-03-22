@@ -601,7 +601,7 @@ image_size = 32
 aug_scale = 0.05
 aug_angle = 15
 output_dir = "./output"
-
+replicas = 1 # Number of IPUs to be used in a data-parallel mode
 
 def train_validate():
     
@@ -611,7 +611,7 @@ def train_validate():
     model_opts = poptorch.Options()
     model_opts.enableExecutableCaching("./cache")
     # model_opts.deviceIterations(device_iter)
-    # model_opts.replicationFactor(replicas)
+    model_opts.replicationFactor(replicas)
 
     unet = UNet(in_channels=BrainSegmentationDataset.in_channels, out_channels=BrainSegmentationDataset.out_channels)
     train_model_with_loss = Unet_with_loss(unet)
