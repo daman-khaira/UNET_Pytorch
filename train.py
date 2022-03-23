@@ -475,7 +475,7 @@ def outline(image, mask, color):
     return image
 
 
-def data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
+def  data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
     dataset_train, dataset_valid = datasets("/localdata/datasets/kaggle_3m/", image_size, aug_scale, aug_angle)
 
     def worker_init(worker_id):
@@ -594,7 +594,7 @@ def plot_dsc(dsc_dist):
 batch_size = 16
 epochs = 50
 lr = 0.0001
-workers = 0
+workers = 1
 weights = "./"
 image_size = 32
 #image_size = 224
@@ -604,14 +604,34 @@ output_dir = "./output"
 replicas = 1 # Number of IPUs to be used in a data-parallel mode
 
 def train_validate():
-    
-    loader_train, loader_valid = data_loaders(batch_size, workers, image_size, aug_scale, aug_angle)
-    loaders = {"train": loader_train, "valid": loader_valid}
 
     model_opts = poptorch.Options()
     model_opts.enableExecutableCaching("./cache")
     # model_opts.deviceIterations(device_iter)
     model_opts.replicationFactor(replicas)
+
+    dataset_train, dataset_valid = datasets("/localdata/datasets/kaggle_3m/", image_size, aug_scale, aug_angle)
+    loader_train = poptorch.DataLoader( options=model_opts, 
+                                dataset=dataset_train,
+                                batch_size = batch_size,
+                                shuffle=True,
+                                drop_last=True,
+                                num_workers=workers,
+                                persistent_workers=True
+                                )
+
+    loader_valid = poptorch.DataLoader( options=model_opts, 
+                                dataset=dataset_valid,
+                                batch_size = batch_size,
+                                shuffle=True,
+                                drop_last=True,
+                                num_workers=workers,
+                                persistent_workers=True
+                                )
+
+    # loader_train, loader_valid = data_loaders(batch_size, workers, image_size, aug_scale, aug_angle)
+    loaders = {"train": loader_train, "valid": loader_valid}
+
 
     unet = UNet(in_channels=BrainSegmentationDataset.in_channels, out_channels=BrainSegmentationDataset.out_channels)
     train_model_with_loss = Unet_with_loss(unet)
@@ -657,7 +677,7 @@ def train_validate():
             _, loss = training_model(X,Y)
             toc = time.perf_counter()
             time_train += toc-tic
-
+            loss = torch.mean(loss)
             train_loss += loss.item()
         train_loss /= len(loader_train)
         training_model.copyWeightsToHost()
@@ -666,6 +686,8 @@ def train_validate():
         for X,Y in loader_valid:
             tic = time.perf_counter()
             y_pred, loss = inference_model(X,Y)
+            loss = torch.mean(loss)
+
             toc = time.perf_counter()
             val_time += toc-tic
             valid_loss += loss.item()
