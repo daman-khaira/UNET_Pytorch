@@ -594,7 +594,7 @@ def plot_dsc(dsc_dist):
 batch_size = 16
 epochs = 50
 lr = 0.0001
-workers = 1
+workers = 8
 weights = "./"
 image_size = 32
 #image_size = 224
@@ -611,13 +611,19 @@ def train_validate():
     model_opts.replicationFactor(replicas)
 
     dataset_train, dataset_valid = datasets("/localdata/datasets/kaggle_3m/", image_size, aug_scale, aug_angle)
+    async_options = { "sharing_strategy": poptorch.SharingStrategy.SharedMemory,
+                    "early_preload":     True, "buffer_size": workers,
+                    "load_indefinitely": True, "miss_sleep_time_in_ms": 0 }
+
     loader_train = poptorch.DataLoader( options=model_opts, 
                                 dataset=dataset_train,
                                 batch_size = batch_size,
                                 shuffle=True,
                                 drop_last=True,
                                 num_workers=workers,
-                                persistent_workers=True
+                                persistent_workers=True,
+                                mode = poptorch.DataLoaderMode.Async,
+                                async_options=async_options
                                 )
 
     loader_valid = poptorch.DataLoader( options=model_opts, 
