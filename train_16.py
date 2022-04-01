@@ -613,6 +613,7 @@ def train_validate():
     model_opts.deviceIterations(device_iter)
     model_opts.replicationFactor(replicas)
     model_opts.Training.gradientAccumulation(grad_accum_factor)
+    model_opts.Precision.setPartialsType(torch.half)
 
     inference_opts = poptorch.Options()
     inference_opts.enableExecutableCaching("./cache")
