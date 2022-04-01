@@ -157,18 +157,17 @@ class BrainSegmentationDataset(Dataset):
         # create list of tuples (volume, mask)
         self.volumes = [(volumes[k], masks[k]) for k in self.patients]
 
-        if image_size < 256:
-            print("cropping {} volumes...".format(subset))
-            # crop to smallest enclosing volume
-            self.volumes = [crop_sample(v) for v in self.volumes]
+        print("cropping {} volumes...".format(subset))
+        # crop to smallest enclosing volume
+        self.volumes = [crop_sample(v) for v in self.volumes]
 
-            print("padding {} volumes...".format(subset))
-            # pad to square
-            self.volumes = [pad_sample(v) for v in self.volumes]
+        print("padding {} volumes...".format(subset))
+        # pad to square
+        self.volumes = [pad_sample(v) for v in self.volumes]
 
-            print("resizing {} volumes...".format(subset))
-            # resize
-            self.volumes = [resize_sample(v, size=image_size) for v in self.volumes]
+        print("resizing {} volumes...".format(subset))
+        # resize
+        self.volumes = [resize_sample(v, size=image_size) for v in self.volumes]
 
         print("normalizing {} volumes...".format(subset))
         # normalize channel-wise
@@ -221,8 +220,8 @@ class BrainSegmentationDataset(Dataset):
         image = image.transpose(2, 0, 1)
         mask = mask.transpose(2, 0, 1)
 
-        image_tensor = torch.from_numpy(image.astype(np.float32))
-        mask_tensor = torch.from_numpy(mask.astype(np.float32))
+        image_tensor = torch.from_numpy(image.astype(np.float16))
+        mask_tensor = torch.from_numpy(mask.astype(np.float16))
 
         # return tensors
         return image_tensor, mask_tensor
@@ -592,19 +591,18 @@ def plot_dsc(dsc_dist):
     return np.fromstring(s, np.uint8).reshape((height, width, 4))
 
 
-batch_size = 1
+batch_size = 4
 epochs = 50
 lr = 0.0001
 workers = 16
 weights = "./"
-image_size = 256
-#image_size = 224
+# image_size = 32
+image_size = 128
 aug_scale = 0.05
 aug_angle = 15
 output_dir = "./output"
 replicas = 1 # Number of IPUs to be used in a data-parallel mode
-grad_accum_factor = 16
-device_iter = 16
+device_iter = 1
 
 def train_validate():
 
@@ -612,19 +610,13 @@ def train_validate():
     model_opts.enableExecutableCaching("./cache")
     model_opts.deviceIterations(device_iter)
     model_opts.replicationFactor(replicas)
-    model_opts.Training.gradientAccumulation(grad_accum_factor)
-
-    inference_opts = poptorch.Options()
-    inference_opts.enableExecutableCaching("./cache")
-    # inference_opts.deviceIterations(device_iter)
-    inference_opts.replicationFactor(replicas)
 
     dataset_train, dataset_valid = datasets("/localdata/datasets/kaggle_3m/", image_size, aug_scale, aug_angle)
     async_options = { "sharing_strategy": poptorch.SharingStrategy.SharedMemory,
                     "early_preload":     True, "buffer_size": workers,
                     "load_indefinitely": True, "miss_sleep_time_in_ms": 0 }
 
-    loader_train = poptorch.DataLoader( options=model_opts,
+    loader_train = poptorch.DataLoader( options=model_opts, 
                                 dataset=dataset_train,
                                 batch_size = batch_size,
                                 shuffle=True,
@@ -635,7 +627,7 @@ def train_validate():
                                 async_options=async_options
                                 )
 
-    loader_valid = poptorch.DataLoader( options=inference_opts, 
+    loader_valid = poptorch.DataLoader( options=model_opts, 
                                 dataset=dataset_valid,
                                 batch_size = batch_size,
                                 shuffle=True,
@@ -649,10 +641,11 @@ def train_validate():
 
 
     unet = UNet(in_channels=BrainSegmentationDataset.in_channels, out_channels=BrainSegmentationDataset.out_channels)
+    unet = unet.half()
     train_model_with_loss = Unet_with_loss(unet)
-    optimizer = poptorch.optim.Adam(unet.parameters(), lr=lr) 
+    optimizer = poptorch.optim.Adam(unet.parameters(), lr=lr, accum_type = torch.float16, loss_scaling = 1024)
     training_model = poptorch.trainingModel(train_model_with_loss, options=model_opts, optimizer=optimizer)
-    inference_model = poptorch.inferenceModel(train_model_with_loss, options=inference_opts)
+    inference_model = poptorch.inferenceModel(train_model_with_loss, options=model_opts)
 
     train_img, train_lbl = next(iter(loader_train))
     val_img, val_lbl     = next(iter(loader_valid))
@@ -741,7 +734,7 @@ def train_validate():
     state_dict = torch.load(os.path.join(weights, "unet.pt"))
     unet.load_state_dict(state_dict)
     final_model = Unet_with_loss(unet)
-    inference_model = poptorch.inferenceModel(final_model, options=inference_opts)
+    inference_model = poptorch.inferenceModel(final_model, options=model_opts)
 
     shutil.rmtree(output_dir,ignore_errors=True)
     os.mkdir(output_dir)
